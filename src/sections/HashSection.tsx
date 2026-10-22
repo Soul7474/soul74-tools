@@ -1,5 +1,7 @@
 import { useState, type ChangeEvent } from "react";
-import { compareHashes as compareHashValues, digestAlgorithms, digestFile, digestText, identifyHashFormat, MAX_HASH_FILE_SIZE, type SupportedDigest } from "../lib/hash";
+import { compareHashes as compareHashValues, crc32Text, digestAlgorithms, digestFile, digestText, hmacText, identifyHashFormat, md5Text, MAX_HASH_FILE_SIZE, type SupportedDigest } from "../lib/hash";
+import { copyToClipboard } from "../lib/feedback";
+import { SectionHeader } from "../components/SectionHeader";
 
 type HashResult = { algorithm: SupportedDigest; hash: string; source: "text" | "file"; fileName?: string; fileSize?: number };
 
@@ -8,11 +10,6 @@ const formatBytes = (size: number) => {
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KiB`;
   return `${(size / (1024 * 1024)).toFixed(2)} MiB`;
 };
-
-async function copyValue(value: string): Promise<void> {
-  if (!navigator.clipboard?.writeText) throw new Error("El portapapeles no está disponible en este contexto.");
-  await navigator.clipboard.writeText(value);
-}
 
 export function HashSection() {
   const [text, setText] = useState("");
@@ -28,6 +25,13 @@ export function HashSection() {
   const [comparison, setComparison] = useState<"equal" | "different" | "">("");
   const [comparisonError, setComparisonError] = useState("");
   const [identifyInput, setIdentifyInput] = useState("");
+  const [compatibilityInput, setCompatibilityInput] = useState("");
+  const [compatibilityResult, setCompatibilityResult] = useState<{ md5: string; crc32: string } | null>(null);
+  const [hmacKey, setHmacKey] = useState("");
+  const [hmacInput, setHmacInput] = useState("");
+  const [hmacAlgorithm, setHmacAlgorithm] = useState<SupportedDigest>("SHA-256");
+  const [hmacResult, setHmacResult] = useState("");
+  const [hmacStatus, setHmacStatus] = useState("");
 
   async function calculateTextHash() {
     setBusy(true);
@@ -82,7 +86,7 @@ export function HashSection() {
   async function copyHash() {
     if (!result) return;
     try {
-      await copyValue(result.hash);
+      await copyToClipboard(result.hash, "Hash");
       setCopyStatus("Hash copiado.");
     } catch (error) {
       setCopyStatus(error instanceof Error ? error.message : "No se pudo copiar.");
@@ -99,14 +103,22 @@ export function HashSection() {
     }
   }
 
+  async function calculateHmac() {
+    setHmacStatus("Calculando HMAC localmente…");
+    setHmacResult("");
+    try {
+      setHmacResult(await hmacText(hmacAlgorithm, hmacKey, hmacInput));
+      setHmacStatus("HMAC calculado en este navegador. La clave no se guarda ni transmite.");
+    } catch (error) {
+      setHmacStatus(error instanceof Error ? error.message : "No se pudo calcular HMAC.");
+    }
+  }
+
   const guesses = identifyHashFormat(identifyInput);
 
   return (
     <section className="page-view tool-page lab-page">
-      <div className="page-title-row">
-        <div><div className="eyebrow"><span className="eyebrow-line" /> SECURITY / DIGESTS</div><h1>Hash <span>lab.</span></h1><p className="page-description">Calcula y compara digests en este dispositivo. No se almacena ni transmite tu entrada.</p></div>
-        <span className="tool-status"><span /> WEB CRYPTO</span>
-      </div>
+      <SectionHeader eyebrow={<><span className="eyebrow-line" /> SECURITY / DIGESTS</>} title={<>Hash <span>lab.</span></>} description="Calcula y compara digests en este dispositivo. No se almacena ni transmite tu entrada." status="WEB CRYPTO" />
 
       <div className="lab-grid">
         <section className="panel lab-panel">
@@ -150,9 +162,10 @@ export function HashSection() {
           <input className="field-input" value={identifyInput} onChange={(event) => setIdentifyInput(event.target.value)} placeholder="Pega una cadena hash o PHC…" aria-label="Cadena para identificar formato" />
           {identifyInput.trim() && (
             <div className="guess-list" aria-live="polite">
-              {guesses.length ? guesses.map((guess) => <div className="guess-item" key={guess.name}><strong>{guess.name}</strong><span>Probable · {guess.reason}</span></div>) : <p className="microcopy">Sin candidatos por formato conocido. No se puede confirmar el algoritmo solo por el aspecto de la cadena.</p>}
+              {guesses.length ? guesses.map((guess) => <div className="guess-item" key={guess.name}><strong>{guess.name}</strong><span>Indicador · {guess.reason}{guess.hashcatMode && ` Hashcat: ${guess.hashcatMode}.`}{guess.johnFormat && ` John: ${guess.johnFormat}.`}</span></div>) : <p className="microcopy">Sin candidatos por formato conocido. No se puede confirmar el algoritmo solo por el aspecto de la cadena.</p>}
             </div>
           )}
+          <p className="notice notice-warning">Solo identificación heurística de formatos; no se realiza ningún descifrado ni crackeo. Las cadenas hexadecimales pueden corresponder a varios algoritmos.</p>
         </section>
       </div>
 
@@ -176,6 +189,37 @@ export function HashSection() {
           <p className="notice notice-warning">La identificación por formato es heurística: un candidato probable no confirma el algoritmo.</p>
         </section>
       </div>
+
+      <div className="lab-grid hash-extra-grid">
+        <section className="panel lab-panel">
+          <div className="panel-heading"><div><span className="panel-kicker">05 / COMPATIBILITY</span><h2>MD5 legado y CRC32</h2></div></div>
+          <p className="notice notice-warning">MD5 es legado e inseguro: úsalo solo para compatibilidad y análisis forense. CRC32 detecta errores accidentales y no es una función criptográfica.</p>
+          <label className="field-label" htmlFor="hash-compatibility-input">Texto de entrada</label>
+          <textarea id="hash-compatibility-input" className="field-input field-textarea" value={compatibilityInput} onChange={(event) => setCompatibilityInput(event.target.value)} placeholder="Texto para MD5 / CRC32" />
+          <button type="button" className="primary-button" onClick={() => setCompatibilityResult({ md5: md5Text(compatibilityInput), crc32: crc32Text(compatibilityInput) })}>Calcular localmente</button>
+          {compatibilityResult && <div className="hash-extra-results"><code>MD5 · {compatibilityResult.md5}</code><code>CRC32 · {compatibilityResult.crc32}</code></div>}
+        </section>
+
+        <section className="panel lab-panel">
+          <div className="panel-heading"><div><span className="panel-kicker">06 / MESSAGE AUTHENTICATION</span><h2>HMAC con Web Crypto</h2></div></div>
+          <label className="field-label" htmlFor="hmac-algorithm">Hash interno</label>
+          <select id="hmac-algorithm" className="field-input" value={hmacAlgorithm} onChange={(event) => {
+            const selected = digestAlgorithms.find((item) => item === event.target.value);
+            if (selected) setHmacAlgorithm(selected);
+          }}>
+            {digestAlgorithms.map((item) => <option key={item} value={item}>{item}</option>)}
+          </select>
+          <label className="field-label" htmlFor="hmac-key">Clave HMAC (solo memoria)</label>
+          <input id="hmac-key" className="field-input" type="password" autoComplete="new-password" value={hmacKey} onChange={(event) => setHmacKey(event.target.value)} />
+          <label className="field-label" htmlFor="hmac-input">Mensaje</label>
+          <textarea id="hmac-input" className="field-input field-textarea" value={hmacInput} onChange={(event) => setHmacInput(event.target.value)} />
+          <button type="button" className="primary-button" onClick={() => void calculateHmac()}>Calcular HMAC</button>
+          {hmacResult && <div className="hash-extra-results"><code>{hmacAlgorithm} · {hmacResult}</code></div>}
+          {hmacStatus && <p className="microcopy" role="status">{hmacStatus}</p>}
+          <p className="notice">La clave se procesa localmente, no se conserva al salir de la sección ni se envía a un servicio.</p>
+        </section>
+      </div>
+      <p className="notice notice-warning">Identificación y cálculos locales únicamente: no se descifran ni se crackean hashes. Las firmas JWT tampoco se verifican aquí.</p>
     </section>
   );
 }

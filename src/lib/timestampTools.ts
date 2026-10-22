@@ -315,3 +315,114 @@ export function formatInTimeZone(date: Date, timeZone: string): { formatted: str
   }
   return { formatted, offset };
 }
+
+export type ForensicTimestampKind = "filetime" | "webkit" | "dotnet" | "mac";
+export type ForensicTimestampResult = {
+  kind: ForensicTimestampKind | "auto";
+  label: string;
+  original: string;
+  date: Date;
+  iso: string;
+  unixMilliseconds: number;
+  warning: string;
+  ambiguous?: boolean;
+};
+
+const forensicEpochOffsets: Record<Exclude<ForensicTimestampKind, "mac">, bigint> = {
+  filetime: 116_444_736_000_000_000n,
+  webkit: 11_644_473_600_000_000n,
+  dotnet: 621_355_968_000_000_000n,
+};
+
+function checkedForensicDate(milliseconds: number): Date {
+  if (!Number.isFinite(milliseconds) || Math.abs(milliseconds) > MAX_JAVASCRIPT_DATE_MS) {
+    throw new Error("El valor queda fuera del rango representable por JavaScript Date.");
+  }
+  const date = new Date(milliseconds);
+  if (!Number.isFinite(date.getTime())) throw new Error("No se puede representar la fecha.");
+  return date;
+}
+
+function integerCounter(value: string): bigint {
+  const trimmed = value.trim();
+  if (!/^\+?\d+$/.test(trimmed)) throw new Error("Introduce un contador entero no negativo.");
+  return BigInt(trimmed.replace(/^\+/, ""));
+}
+
+export function convertForensicTimestamp(
+  kind: ForensicTimestampKind,
+  value: string,
+): ForensicTimestampResult {
+  let milliseconds: number;
+  let label: string;
+  if (kind === "mac") {
+    const seconds = Number(value.trim());
+    if (!value.trim() || !Number.isFinite(seconds)) throw new Error("Introduce segundos Mac Absolute válidos.");
+    milliseconds = seconds * 1000 + 978_307_200_000;
+    label = "Mac Absolute Time (segundos desde 2001-01-01 UTC)";
+  } else {
+    const count = integerCounter(value);
+    const tickFactor = kind === "webkit" ? 1000n : 10_000n;
+    const unixCount = count - forensicEpochOffsets[kind];
+    milliseconds = Number(unixCount / tickFactor);
+    label = kind === "filetime"
+      ? "Windows FILETIME (ticks de 100 ns desde 1601-01-01 UTC)"
+      : kind === "webkit"
+        ? "WebKit/Chrome (microsegundos desde 1601-01-01 UTC)"
+        : ".NET DateTime ticks (100 ns desde 0001-01-01 UTC)";
+  }
+  const date = checkedForensicDate(milliseconds);
+  return {
+    kind,
+    label,
+    original: value.trim(),
+    date,
+    iso: date.toISOString(),
+    unixMilliseconds: date.getTime(),
+    warning: "Conversión de época local: verifica el formato y la unidad de origen.",
+  };
+}
+
+export function autodetectUnixTimestamp(value: string): ForensicTimestampResult {
+  const trimmed = value.trim();
+  if (!trimmed || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(trimmed)) {
+    throw new Error("Introduce un timestamp Unix numérico.");
+  }
+  const numeric = Number(trimmed);
+  if (!Number.isFinite(numeric)) throw new Error("El timestamp debe ser un número finito.");
+  const absolute = Math.abs(numeric);
+  const digits = trimmed.replace(/^[+-]/, "").replace(/\D/g, "").replace(/^0+/, "").length;
+  let unit: string;
+  let milliseconds: number;
+  let ambiguous = false;
+  if (absolute < 1e11) {
+    unit = "segundos";
+    milliseconds = numeric * 1000;
+    ambiguous = absolute < 1e6;
+  } else if (absolute < 1e14) {
+    unit = "milisegundos";
+    milliseconds = numeric;
+    ambiguous = digits < 13;
+  } else if (absolute < 1e17) {
+    unit = "microsegundos";
+    milliseconds = numeric / 1000;
+    ambiguous = digits < 16;
+  } else {
+    unit = "nanosegundos";
+    milliseconds = numeric / 1e6;
+    ambiguous = digits < 19;
+  }
+  const date = checkedForensicDate(milliseconds);
+  return {
+    kind: "auto",
+    label: `Unix autodetectado como ${unit}`,
+    original: trimmed,
+    date,
+    iso: date.toISOString(),
+    unixMilliseconds: date.getTime(),
+    ambiguous,
+    warning: ambiguous
+      ? `La unidad es ambigua por la magnitud del valor; se eligió ${unit} como hipótesis. Confirma la unidad con la fuente.`
+      : `Unidad inferida por magnitud (${unit}); la autodetección es heurística, confirma con la fuente.`,
+  };
+}

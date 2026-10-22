@@ -1,4 +1,6 @@
 import { useMemo, useState, type ChangeEvent, type ReactNode } from "react";
+import { copyToClipboard } from "../lib/feedback";
+import { SectionHeader } from "../components/SectionHeader";
 import {
   analyzeLogs,
   analyzeText,
@@ -25,6 +27,13 @@ import {
   type TextTransform,
   type TransformOptions,
 } from "../lib/textTools";
+import { IOC_ANALYZER_EVENT } from "../lib/iocAnalyzer";
+import {
+  analyzeStructuredLogsInWorker,
+  type LogFormat,
+  type ParsedLogEntry,
+  type StructuredLogAnalysis,
+} from "../lib/logAnalyzer";
 
 type TextTab = "metrics" | "transform" | "search" | "regex" | "compare" | "indicators" | "logs";
 
@@ -81,10 +90,7 @@ const costlyTransforms = new Set<TextTransform>([
 ]);
 
 function copyText(value: string): Promise<void> {
-  if (!navigator.clipboard?.writeText) {
-    return Promise.reject(new Error("El portapapeles no está disponible en este contexto."));
-  }
-  return navigator.clipboard.writeText(value);
+  return copyToClipboard(value, "Resultado");
 }
 
 function downloadText(value: string, filename: string): void {
@@ -172,6 +178,20 @@ export function TextRegexSection() {
   const [logAnalysis, setLogAnalysis] = useState<LogAnalysis | null>(null);
   const [logError, setLogError] = useState("");
   const [logFileName, setLogFileName] = useState("");
+  const [logFormat, setLogFormat] = useState<LogFormat>("auto");
+  const [structuredFilters, setStructuredFilters] = useState({ ip: "", status: "", method: "", user: "", from: "", to: "", text: "", regex: false });
+  const [failedLoginThreshold, setFailedLoginThreshold] = useState(5);
+  const [failedLoginWindow, setFailedLoginWindow] = useState(10);
+  const [errorStatusThreshold, setErrorStatusThreshold] = useState(10);
+  const [pathTraversalThreshold, setPathTraversalThreshold] = useState(1);
+  const [sqliThreshold, setSqliThreshold] = useState(1);
+  const [xssThreshold, setXssThreshold] = useState(1);
+  const [scannerThreshold, setScannerThreshold] = useState(1);
+  const [structuredAnalysis, setStructuredAnalysis] = useState<StructuredLogAnalysis | null>(null);
+  const [structuredBusy, setStructuredBusy] = useState(false);
+  const [structuredError, setStructuredError] = useState("");
+  const [structuredPage, setStructuredPage] = useState(0);
+  const [selectedStructuredEntry, setSelectedStructuredEntry] = useState<ParsedLogEntry | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
@@ -288,12 +308,14 @@ export function TextRegexSection() {
     if (!file) return;
     if (file.size > LOG_INPUT_LIMIT * 4) {
       setLogError(`El archivo supera el límite aproximado de ${(LOG_INPUT_LIMIT * 4 / 1_000_000).toFixed(0)} MB.`);
+      event.target.value = "";
       return;
     }
     try {
       const contents = await file.text();
       if (contents.length > LOG_INPUT_LIMIT) {
         setLogError(`El texto del archivo supera el límite de ${LOG_INPUT_LIMIT.toLocaleString("es-ES")} unidades UTF-16.`);
+        event.target.value = "";
         return;
       }
       setLogsText(contents);
@@ -302,8 +324,50 @@ export function TextRegexSection() {
       setLogError("");
     } catch (reason) {
       setLogError(reason instanceof Error ? reason.message : "No se pudo leer el archivo local.");
+    } finally {
+      event.target.value = "";
     }
   }
+
+  async function runStructuredLogAnalysis() {
+    setStructuredBusy(true);
+    setStructuredError("");
+    try {
+      const result = await analyzeStructuredLogsInWorker(logsText, logFormat, structuredFilters, {
+        failedLoginThreshold,
+        windowMinutes: failedLoginWindow,
+        errorStatusThreshold,
+        pathTraversalThreshold,
+        sqliThreshold,
+        xssThreshold,
+        scannerThreshold,
+      });
+      setStructuredAnalysis(result);
+      setStructuredPage(0);
+      setSelectedStructuredEntry(result.entries[0] ?? null);
+    } catch (reason) {
+      setStructuredAnalysis(null);
+      setStructuredError(reason instanceof Error ? reason.message : "No se pudo ejecutar el análisis estructurado de logs.");
+    } finally {
+      setStructuredBusy(false);
+    }
+  }
+
+  function openLogIndicatorsInIoc() {
+    if (!structuredAnalysis) return;
+    const ips = [...new Set(structuredAnalysis.entries.map((entry) => entry.ip).filter(Boolean))];
+    if (!ips.length) {
+      setStructuredError("No hay IPs extraídas en los registros filtrados.");
+      return;
+    }
+    window.dispatchEvent(new CustomEvent<string>(IOC_ANALYZER_EVENT, { detail: ips.join("\n") }));
+  }
+
+  const structuredPageSize = 50;
+  const structuredPageCount = structuredAnalysis ? Math.ceil(structuredAnalysis.entries.length / structuredPageSize) : 0;
+  const structuredPageEntries = structuredAnalysis
+    ? structuredAnalysis.entries.slice(structuredPage * structuredPageSize, (structuredPage + 1) * structuredPageSize)
+    : [];
 
   function renderSearchResults() {
     if (!searchResults.length) {
@@ -330,10 +394,7 @@ export function TextRegexSection() {
 
   return (
     <section className="page-view tool-page lab-page text-lab-page">
-      <div className="page-title-row">
-        <div><div className="eyebrow"><span className="eyebrow-line" /> TEXT / REGEX / LOCAL ANALYSIS</div><h1>Text &amp; Regex <span>lab.</span></h1><p className="page-description">Procesa texto y logs localmente. Entrada limitada a {TEXT_INPUT_LIMIT.toLocaleString("es-ES")} unidades UTF-16.</p></div>
-        <span className="tool-status"><span /> SIN PERSISTENCIA</span>
-      </div>
+      <SectionHeader eyebrow={<><span className="eyebrow-line" /> TEXT / REGEX / LOCAL ANALYSIS</>} title={<>Text &amp; Regex <span>lab.</span></>} description={<>Procesa texto y logs localmente. Entrada limitada a {TEXT_INPUT_LIMIT.toLocaleString("es-ES")} unidades UTF-16.</>} status="SIN PERSISTENCIA" />
 
       <div className="text-workspace">
         <nav className="text-tabs" role="tablist" aria-label="Herramientas de texto">
@@ -404,7 +465,7 @@ export function TextRegexSection() {
               <div className="panel-divider" />
               <div className="panel-heading compact-heading"><div><span className="panel-kicker">OUTPUT</span><h2>Resultado</h2></div></div>
               <textarea className="field-input text-output" value={output} readOnly placeholder="La salida transformada aparece aquí…" />
-              <div className="action-row"><button type="button" className="secondary-button" disabled={!output} onClick={() => void copyResult(output, "Resultado")}>Copiar</button><button type="button" className="secondary-button" disabled={!output} onClick={() => downloadText(output, "smartin-text-output.txt")}>Descargar .txt</button></div>
+              <div className="action-row"><button type="button" className="secondary-button" disabled={!output} onClick={() => void copyResult(output, "Resultado")}>Copiar</button><button type="button" className="secondary-button" disabled={!output} onClick={() => downloadText(output, "s0ul74-text-output.txt")}>Descargar .txt</button></div>
             </div>
           </div>
         )}
@@ -475,7 +536,7 @@ export function TextRegexSection() {
                 <label className="check-choice"><input type="checkbox" checked={ignoreWhitespace} onChange={(event) => setIgnoreWhitespace(event.target.checked)} /> Ignorar espacios exteriores</label>
                 <label className="check-choice"><input type="checkbox" checked={ignoreCase} onChange={(event) => setIgnoreCase(event.target.checked)} /> Ignorar mayúsculas</label>
               </div>
-              <div className="action-row"><button type="button" className="primary-button" onClick={runDiff}>Comparar textos</button><button type="button" className="secondary-button" disabled={!diffResults.length} onClick={() => void copyResult(reportForDiff(diffResults), "Informe")}>Copiar informe</button><button type="button" className="secondary-button" disabled={!diffResults.length} onClick={() => downloadText(reportForDiff(diffResults), "smartin-text-diff.txt")}>Descargar informe</button></div>
+              <div className="action-row"><button type="button" className="primary-button" onClick={runDiff}>Comparar textos</button><button type="button" className="secondary-button" disabled={!diffResults.length} onClick={() => void copyResult(reportForDiff(diffResults), "Informe")}>Copiar informe</button><button type="button" className="secondary-button" disabled={!diffResults.length} onClick={() => downloadText(reportForDiff(diffResults), "s0ul74-text-diff.txt")}>Descargar informe</button></div>
               {diffError && <p className="error-message" role="alert">{diffError}</p>}
               <div className="diff-results">
                 {diffResults.map((line, index) => <div className={`diff-line diff-${line.type}`} key={`${line.type}-${line.leftLine}-${line.rightLine}-${index}`}><span>{line.type === "added" ? "+" : line.type === "removed" ? "−" : line.type === "modified" ? "~" : " "}</span><span>{line.leftLine ?? "—"}</span><span>{line.rightLine ?? "—"}</span><code>{line.type === "modified" ? `${line.value}  →  ${line.otherValue}` : line.value}</code></div>)}
@@ -516,13 +577,90 @@ export function TextRegexSection() {
                 <label className="encoding-pane"><span className="pane-heading">TÉRMINOS (SEPARADOS POR COMAS)</span><input className="field-input" value={logTerms} onChange={(event) => setLogTerms(event.target.value)} placeholder="error, failed, warning" /></label>
                 <label className="encoding-pane"><span className="pane-heading">CONTEXTO (LÍNEAS)</span><input className="field-input small-field" type="number" min={0} max={10} value={logContext} onChange={(event) => setLogContext(Number(event.target.value))} /></label>
               </div>
-              <div className="action-row"><button type="button" className="primary-button" onClick={runLogs}>Analizar logs</button><button type="button" className="secondary-button" onClick={() => { setLogsText(""); setLogAnalysis(null); setLogError(""); setLogFileName(""); }}>Limpiar análisis</button>{logAnalysis && <button type="button" className="secondary-button" onClick={() => downloadText(formatLogAnalysis(logAnalysis), "smartin-log-analysis.txt")}>Exportar resultados</button>}</div>
+              <div className="action-row"><button type="button" className="primary-button" onClick={runLogs}>Analizar logs</button><button type="button" className="secondary-button" onClick={() => { setLogsText(""); setLogAnalysis(null); setStructuredAnalysis(null); setSelectedStructuredEntry(null); setLogError(""); setStructuredError(""); setLogFileName(""); }}>Limpiar análisis</button>{logAnalysis && <button type="button" className="secondary-button" onClick={() => downloadText(formatLogAnalysis(logAnalysis), "s0ul74-log-analysis.txt")}>Exportar resultados</button>}</div>
               {logError && <p className="error-message" role="alert">{logError}</p>}
               {logAnalysis && (
                 <div className="log-results">
                   <div className="log-summary"><strong>{logAnalysis.matchedLineCount}</strong><span>líneas coincidentes de {logAnalysis.totalLines}</span></div>
                   {logAnalysis.terms.map(({ term, matches }) => <section className="log-term-group" key={term}><div className="panel-heading compact-heading"><h3>{term}</h3><span className="result-count">{matches.length} coincidencias</span></div>{matches.length ? matches.map((match) => <div className="log-match" key={`${term}-${match.lineNumber}`}>{match.contextBefore.map((line) => <div className="log-context-line" key={`before-${line.lineNumber}`}><span>{line.lineNumber}</span><code>{line.text}</code></div>)}<div className="log-context-line matched"><span>{match.lineNumber}</span><code>{match.text}</code></div>{match.contextAfter.map((line) => <div className="log-context-line" key={`after-${line.lineNumber}`}><span>{line.lineNumber}</span><code>{line.text}</code></div>)}</div>) : <p className="microcopy">Sin líneas para este término.</p>}</section>)}
                   <button type="button" className="secondary-button" onClick={() => void copyResult(formatLogAnalysis(logAnalysis), "Análisis de logs")}>Copiar informe</button>
+                </div>
+              )}
+            </div>
+            <div className="panel tool-subpanel structured-log-panel">
+              <div className="panel-heading"><div><span className="panel-kicker">STRUCTURED / WORKER ANALYSIS</span><h2>Parser y análisis local</h2></div><span className="tool-status">HEURÍSTICO</span></div>
+              <p className="microcopy">Parsea Apache/Nginx, Linux syslog y Windows como texto o CSV del Visor de eventos. El archivo se procesa localmente en un Web Worker; límite de entrada: 1.000.000 unidades UTF-16.</p>
+              <div className="structured-log-controls">
+                <label className="file-control">Formato
+                  <select className="field-input" value={logFormat} onChange={(event) => setLogFormat(event.target.value as LogFormat)}>
+                    <option value="auto">Detección automática</option>
+                    <option value="apache">Apache common / combined</option>
+                    <option value="nginx">Nginx access log / JSON</option>
+                    <option value="syslog">Linux syslog / auth.log</option>
+                    <option value="windows-text">Windows Event Viewer (texto)</option>
+                    <option value="windows-csv">Windows Event Viewer (CSV)</option>
+                    <option value="unknown">Texto sin formato</option>
+                  </select>
+                </label>
+                <label className="file-control">IP<input className="field-input" value={structuredFilters.ip} onChange={(event) => setStructuredFilters((current) => ({ ...current, ip: event.target.value }))} placeholder="192.0.2.1" /></label>
+                <label className="file-control">Estado / Event ID<input className="field-input" value={structuredFilters.status} onChange={(event) => setStructuredFilters((current) => ({ ...current, status: event.target.value }))} placeholder="404 / 4625" /></label>
+                <label className="file-control">Método<input className="field-input" value={structuredFilters.method} onChange={(event) => setStructuredFilters((current) => ({ ...current, method: event.target.value }))} placeholder="GET" /></label>
+                <label className="file-control">Usuario<input className="field-input" value={structuredFilters.user} onChange={(event) => setStructuredFilters((current) => ({ ...current, user: event.target.value }))} placeholder="usuario" /></label>
+                <label className="file-control">Desde<input className="field-input" type="date" value={structuredFilters.from} onChange={(event) => setStructuredFilters((current) => ({ ...current, from: event.target.value }))} /></label>
+                <label className="file-control">Hasta<input className="field-input" type="date" value={structuredFilters.to} onChange={(event) => setStructuredFilters((current) => ({ ...current, to: event.target.value }))} /></label>
+                <label className="file-control structured-text-filter">Texto / Regex<input className="field-input" value={structuredFilters.text} onChange={(event) => setStructuredFilters((current) => ({ ...current, text: event.target.value }))} placeholder="buscar en la línea" /></label>
+                <label className="check-choice structured-regex-toggle"><input type="checkbox" checked={structuredFilters.regex} onChange={(event) => setStructuredFilters((current) => ({ ...current, regex: event.target.checked }))} /> Tratar filtro como Regex</label>
+              </div>
+              <div className="structured-thresholds">
+                <label className="file-control">Fallos de login / IP<input className="field-input small-field" type="number" min={1} max={10000} value={failedLoginThreshold} onChange={(event) => setFailedLoginThreshold(Number(event.target.value))} /></label>
+                <label className="file-control">Ventana (min)<input className="field-input small-field" type="number" min={1} max={1440} value={failedLoginWindow} onChange={(event) => setFailedLoginWindow(Number(event.target.value))} /></label>
+                <label className="file-control">Umbral 4xx/5xx<input className="field-input small-field" type="number" min={1} max={10000} value={errorStatusThreshold} onChange={(event) => setErrorStatusThreshold(Number(event.target.value))} /></label>
+                <label className="file-control">Path traversal<input className="field-input small-field" type="number" min={1} max={10000} value={pathTraversalThreshold} onChange={(event) => setPathTraversalThreshold(Number(event.target.value))} /></label>
+                <label className="file-control">SQLi<input className="field-input small-field" type="number" min={1} max={10000} value={sqliThreshold} onChange={(event) => setSqliThreshold(Number(event.target.value))} /></label>
+                <label className="file-control">XSS<input className="field-input small-field" type="number" min={1} max={10000} value={xssThreshold} onChange={(event) => setXssThreshold(Number(event.target.value))} /></label>
+                <label className="file-control">User-Agent escáner<input className="field-input small-field" type="number" min={1} max={10000} value={scannerThreshold} onChange={(event) => setScannerThreshold(Number(event.target.value))} /></label>
+              </div>
+              <div className="action-row">
+                <button type="button" className="primary-button" onClick={() => void runStructuredLogAnalysis()} disabled={structuredBusy}>{structuredBusy ? "Analizando en Worker…" : "Aplicar parser, filtros e indicadores"}</button>
+                <button type="button" className="secondary-button" onClick={openLogIndicatorsInIoc} disabled={!structuredAnalysis}>Abrir IPs filtradas en IOC Analyzer</button>
+              </div>
+              {structuredError && <p className="error-message" role="alert">{structuredError}</p>}
+              {structuredAnalysis && (
+                <div className="structured-log-results" aria-live="polite">
+                  <div className="log-summary"><strong>{structuredAnalysis.filteredLines}</strong><span>registros visibles de {structuredAnalysis.parsedLines} · formato: {structuredAnalysis.detectedFormat}</span></div>
+                  <p className="notice notice-warning">Indicadores heurísticos, no veredictos de ataque. El analizador no captura tráfico en directo, no contacta con la red y no confirma compromiso. Fechas sin año (syslog RFC 3164) no se inventan y quedan sin timestamp.</p>
+                  <div className="structured-summary-grid">
+                    {([
+                      ["Top IPs", structuredAnalysis.summary.topIps],
+                      ["Top URLs", structuredAnalysis.summary.topUrls],
+                      ["Estados", structuredAnalysis.summary.topStatuses],
+                      ["User agents", structuredAnalysis.summary.topUserAgents],
+                      ["Usuarios", structuredAnalysis.summary.topUsers],
+                    ] as const).map(([title, values]) => <section className="structured-summary-card" key={title}><h3>{title}</h3>{values.length ? values.map(({ value, count }) => <div className="structured-top-value" key={value}><code>{value}</code><span>{count}</span></div>) : <p className="microcopy">Sin datos parseados.</p>}</section>)}
+                  </div>
+                  {structuredAnalysis.summary.histogram.length > 0 && (
+                    <div className="log-histogram">
+                      <h3>Distribución temporal (UTC)</h3>
+                      <svg viewBox="0 0 600 130" role="img" aria-label="Histograma temporal de los registros con fecha disponible">
+                        <title>Histograma temporal local</title>
+                        {structuredAnalysis.summary.histogram.map((bin, index, bins) => {
+                          const barWidth = 560 / bins.length;
+                          const max = Math.max(...bins.map((item) => item.count), 1);
+                          const height = (bin.count / max) * 94;
+                          return <g key={`${bin.label}-${index}`}><rect x={20 + index * barWidth} y={104 - height} width={Math.max(2, barWidth - 4)} height={height} rx="2" fill="var(--cyan)" opacity=".8"><title>{new Date(bin.label).toLocaleString()} — {bin.count} registro(s)</title></rect></g>;
+                        })}
+                        <path d="M20 105H580" stroke="currentColor" opacity=".35" />
+                      </svg>
+                    </div>
+                  )}
+                  {structuredAnalysis.heuristics.length > 0 ? <div className="structured-heuristics"><h3>Indicadores heurísticos</h3>{structuredAnalysis.heuristics.map((finding) => <article className="structured-heuristic" key={`${finding.name}-${finding.evidence}`}><strong>{finding.name}</strong><span>{finding.count} · umbral {finding.threshold}</span><small>{finding.evidence}</small></article>)}</div> : <p className="notice">No se alcanzaron los umbrales heurísticos configurados; esto no demuestra ausencia de actividad.</p>}
+                  <div className="structured-table-wrap">
+                    <table className="structured-log-table"><thead><tr><th>Línea</th><th>Fecha</th><th>IP</th><th>Método</th><th>URL / ruta</th><th>Estado / ID</th><th>Usuario</th><th>Detalle</th></tr></thead><tbody>
+                      {structuredPageEntries.map((entry) => <tr key={`${entry.lineNumber}-${entry.raw}`}><td>{entry.lineNumber}</td><td>{entry.timestamp === null ? "—" : new Date(entry.timestamp).toLocaleString()}</td><td>{entry.ip || "—"}</td><td>{entry.method || "—"}</td><td><code>{entry.path || "—"}</code></td><td>{entry.status || entry.eventId || "—"}</td><td>{entry.user || "—"}</td><td><button type="button" className="text-button" onClick={() => setSelectedStructuredEntry(entry)}>Ver</button></td></tr>)}
+                    </tbody></table>
+                  </div>
+                  <div className="structured-pagination"><span>{structuredAnalysis.entries.length ? `${structuredPage * structuredPageSize + 1}–${Math.min((structuredPage + 1) * structuredPageSize, structuredAnalysis.entries.length)} de ${structuredAnalysis.entries.length}` : "Sin registros para los filtros actuales"}</span><div><button type="button" className="secondary-button" disabled={structuredPage <= 0} onClick={() => setStructuredPage((page) => page - 1)}>Anterior</button><button type="button" className="secondary-button" disabled={structuredPage + 1 >= structuredPageCount} onClick={() => setStructuredPage((page) => page + 1)}>Siguiente</button></div></div>
+                  {selectedStructuredEntry && <div className="structured-detail"><span>Línea {selectedStructuredEntry.lineNumber} · detalle original</span><code>{selectedStructuredEntry.raw}</code></div>}
                 </div>
               )}
             </div>

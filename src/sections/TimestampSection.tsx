@@ -1,19 +1,25 @@
 import { useEffect, useState } from "react";
+import { copyToClipboard } from "../lib/feedback";
+import { SectionHeader } from "../components/SectionHeader";
 import {
   calculateTimeDifference,
+  autodetectUnixTimestamp,
+  convertForensicTimestamp,
   convertEpochValue,
   formatInTimeZone,
   localDateTimeToTimestamp,
   parseIsoTimestamp,
   unixTimestampToDate,
   type IsoTimestampResult,
+  type ForensicTimestampKind,
+  type ForensicTimestampResult,
   type LocalDateTimeResult,
   type TimeDifference,
   type TimestampUnit,
   type UnixTimestampResult,
 } from "../lib/timestampTools";
 
-type TimestampTab = "unix" | "date" | "iso" | "difference" | "zones" | "epoch" | "clock";
+type TimestampTab = "unix" | "date" | "iso" | "difference" | "zones" | "epoch" | "forensic" | "clock";
 
 const tabs: Array<{ id: TimestampTab; label: string }> = [
   { id: "unix", label: "Unix → fecha" },
@@ -22,14 +28,14 @@ const tabs: Array<{ id: TimestampTab; label: string }> = [
   { id: "difference", label: "Diferencias" },
   { id: "zones", label: "Zonas horarias" },
   { id: "epoch", label: "Epoch avanzado" },
+  { id: "forensic", label: "Forense" },
   { id: "clock", label: "Reloj" },
 ];
 
 const zones = ["UTC", "Europe/Madrid", "Europe/London", "America/New_York", "America/Los_Angeles", "Asia/Tokyo"];
 
 function copyText(value: string): Promise<void> {
-  if (!navigator.clipboard?.writeText) return Promise.reject(new Error("El portapapeles no está disponible en este contexto."));
-  return navigator.clipboard.writeText(value);
+  return copyToClipboard(value, "Timestamp");
 }
 
 function ResultValue({ label, value, mono = true }: { label: string; value: string | number; mono?: boolean }) {
@@ -115,6 +121,9 @@ export function TimestampSection() {
   const [epochResult, setEpochResult] = useState<ReturnType<typeof convertEpochValue> | null>(null);
   const [logDateValue, setLogDateValue] = useState("");
   const [logDateResult, setLogDateResult] = useState<IsoTimestampResult | null>(null);
+  const [forensicKind, setForensicKind] = useState<ForensicTimestampKind | "auto">("filetime");
+  const [forensicValue, setForensicValue] = useState("116444736000000000");
+  const [forensicResult, setForensicResult] = useState<ForensicTimestampResult | null>(null);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
 
@@ -122,7 +131,7 @@ export function TimestampSection() {
 
   async function copy(value: string, label: string) {
     try {
-      await copyText(value);
+      await copyToClipboard(value, label);
       setMessage(`${label} copiado.`);
       setError("");
     } catch (reason) {
@@ -209,6 +218,18 @@ export function TimestampSection() {
     }
   }
 
+  function runForensicConversion() {
+    setError("");
+    setForensicResult(null);
+    try {
+      setForensicResult(forensicKind === "auto"
+        ? autodetectUnixTimestamp(forensicValue)
+        : convertForensicTimestamp(forensicKind, forensicValue));
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "No se pudo interpretar el timestamp.");
+    }
+  }
+
   function clearCurrent() {
     setError("");
     setMessage("");
@@ -219,14 +240,12 @@ export function TimestampSection() {
     setZoneResult(null);
     setEpochResult(null);
     setLogDateResult(null);
+    setForensicResult(null);
   }
 
   return (
     <section className="page-view tool-page lab-page timestamp-page">
-      <div className="page-title-row">
-        <div><div className="eyebrow"><span className="eyebrow-line" /> TIME / EPOCH / CORRELATION</div><h1>Timestamp <span>lab.</span></h1><p className="page-description">Convierte y compara instantes con zona explícita cuando se conoce; todo se calcula localmente.</p></div>
-        <span className="tool-status"><span /> SYSTEM CLOCK</span>
-      </div>
+      <SectionHeader eyebrow={<><span className="eyebrow-line" /> TIME / EPOCH / CORRELATION</>} title={<>Timestamp <span>lab.</span></>} description="Convierte y compara instantes con zona explícita cuando se conoce; todo se calcula localmente." status="SYSTEM CLOCK" />
 
       <nav className="text-tabs timestamp-tabs" role="tablist" aria-label="Herramientas de tiempo">
         {tabs.map((item) => <button type="button" role="tab" aria-selected={tab === item.id} className={`text-tab ${tab === item.id ? "active" : ""}`} key={item.id} onClick={() => { setTab(item.id); setError(""); setMessage(""); }}>{item.label}</button>)}
@@ -348,6 +367,40 @@ export function TimestampSection() {
           <div className="inline-params"><input className="field-input mono-input" value={logDateValue} onChange={(event) => setLogDateValue(event.target.value)} placeholder="2025-03-08T12:30:00Z" aria-label="Fecha ISO de log" /><button type="button" className="secondary-button" onClick={runLogDateConversion}>Convertir</button></div>
           {logDateResult && <TimestampResults values={[["Unix (s)", logDateResult.seconds], ["Unix (ms)", logDateResult.milliseconds], ["ISO UTC", logDateResult.iso]]} copyValue={String(logDateResult.milliseconds)} onCopy={(value) => void copy(value, "Timestamp")} />}
           {logDateResult?.timezoneKind === "local-assumed" && <p className="notice notice-warning">{logDateResult.warning}</p>}
+        </section>
+      )}
+
+      {tab === "forensic" && (
+        <section className="panel timestamp-panel">
+          <div className="panel-heading"><div><span className="panel-kicker">07 / FORENSIC EPOCHS</span><h2>Épocas y contadores comunes</h2></div><span className="panel-icon cyan-icon">UTC</span></div>
+          <div className="timestamp-input-grid">
+            <label className="encoding-pane">
+              <span className="pane-heading">FORMATO</span>
+              <select className="field-input" value={forensicKind} onChange={(event) => {
+                const value = event.target.value;
+                if (value === "auto" || value === "filetime" || value === "webkit" || value === "dotnet" || value === "mac") setForensicKind(value);
+              }}>
+                <option value="filetime">Windows FILETIME (100 ns)</option>
+                <option value="webkit">WebKit / Chrome (µs)</option>
+                <option value="dotnet">.NET ticks (100 ns)</option>
+                <option value="mac">Mac Absolute Time (s)</option>
+                <option value="auto">Autodetectar Unix (s / ms / µs / ns)</option>
+              </select>
+            </label>
+            <label className="encoding-pane">
+              <span className="pane-heading">VALOR ENTERO O SEGUNDOS MAC</span>
+              <input className="field-input mono-input" inputMode="numeric" value={forensicValue} onChange={(event) => setForensicValue(event.target.value)} />
+            </label>
+          </div>
+          <button type="button" className="primary-button" onClick={runForensicConversion}>Convertir localmente</button>
+          {forensicResult && <div className="timestamp-results" aria-live="polite">
+            <ResultValue label="Interpretación" value={forensicResult.label} mono={false} />
+            <ResultValue label="ISO 8601 UTC" value={forensicResult.iso} />
+            <ResultValue label="Unix (ms)" value={forensicResult.unixMilliseconds} />
+            <button type="button" className="secondary-button" onClick={() => void copy(String(forensicResult.unixMilliseconds), "Timestamp")}>Copiar Unix (ms)</button>
+            <p className={`notice ${forensicResult.ambiguous ? "notice-warning" : ""}`}>{forensicResult.warning}</p>
+          </div>}
+          <p className="notice notice-warning">Autodetección de unidades es heurística y puede ser ambigua. Los valores FILETIME/WebKit/.NET deben ser contadores enteros; Mac Absolute usa segundos desde 2001-01-01 UTC.</p>
         </section>
       )}
 

@@ -1,10 +1,7 @@
 import { useState } from "react";
 import { inspectJwt, type JwtAnalysis } from "../lib/jwt";
-
-async function copyValue(value: string): Promise<void> {
-  if (!navigator.clipboard?.writeText) throw new Error("El portapapeles no está disponible en este contexto.");
-  await navigator.clipboard.writeText(value);
-}
+import { copyToClipboard } from "../lib/feedback";
+import { SectionHeader } from "../components/SectionHeader";
 
 function jsonValue(value: unknown): string {
   return JSON.stringify(value, null, 2);
@@ -39,7 +36,7 @@ export function JwtSection() {
 
   async function copyJson(value: unknown, label: string) {
     try {
-      await copyValue(jsonValue(value));
+      await copyToClipboard(jsonValue(value), label);
       setCopyMessage(`${label} copiado.`);
     } catch (reason) {
       setCopyMessage(reason instanceof Error ? reason.message : "No se pudo copiar.");
@@ -48,10 +45,7 @@ export function JwtSection() {
 
   return (
     <section className="page-view tool-page lab-page">
-      <div className="page-title-row">
-        <div><div className="eyebrow"><span className="eyebrow-line" /> TOKEN STRUCTURE / READ ONLY</div><h1>JWT <span>inspector.</span></h1><p className="page-description">Decodificación local de la estructura compacta y lectura orientativa de claims.</p></div>
-        <span className="tool-status warning-status"><span /> FIRMA NO VERIFICADA</span>
-      </div>
+      <SectionHeader eyebrow={<><span className="eyebrow-line" /> TOKEN STRUCTURE / READ ONLY</>} title={<>JWT <span>inspector.</span></>} description="Decodificación local de la estructura compacta y lectura orientativa de claims." status="FIRMA NO VERIFICADA" statusClass="warning-status" />
 
       <div className="notice notice-warning security-banner" role="note">
         No introduzcas tokens de sesión, contraseñas ni credenciales reales. El token se procesa solo en memoria del navegador y no se envía ni guarda.

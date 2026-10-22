@@ -1,5 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import { applyEncodingOperation, encodingOperations, type EncodingOperation, type EncodingOptions } from "../lib/encoding";
+import { copyToClipboard } from "../lib/feedback";
+import { SectionHeader } from "../components/SectionHeader";
 
 type RecipeStep = { id: number; operation: EncodingOperation; options: EncodingOptions };
 type StepResult = { id: number; output?: string; error?: string };
@@ -48,8 +50,7 @@ export function EncodingSection() {
 
   async function copy(value: string, label: string) {
     try {
-      if (!navigator.clipboard?.writeText) throw new Error("El portapapeles no está disponible en este contexto.");
-      await navigator.clipboard.writeText(value);
+      await copyToClipboard(value, label);
       setStatus(`${label} copiada al portapapeles.`);
       setError("");
     } catch (reason) {
@@ -116,10 +117,7 @@ export function EncodingSection() {
 
   return (
     <section className="page-view tool-page lab-page encoding-page">
-      <div className="page-title-row">
-        <div><div className="eyebrow"><span className="eyebrow-line" /> TRANSFORM / LOCAL PIPELINE</div><h1>Encoding <span>lab.</span></h1><p className="page-description">Transforma representaciones y encadena operaciones reproducibles, sin servicios remotos.</p></div>
-        <span className="tool-status violet-status"><span /> LOCAL ONLY</span>
-      </div>
+      <SectionHeader eyebrow={<><span className="eyebrow-line" /> TRANSFORM / LOCAL PIPELINE</>} title={<>Encoding <span>lab.</span></>} description="Transforma representaciones y encadena operaciones reproducibles, sin servicios remotos." status="LOCAL ONLY" statusClass="violet-status" />
 
       <section className="panel encoding-workbench">
         <div className="workbench-top">

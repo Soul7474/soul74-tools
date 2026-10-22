@@ -1,11 +1,29 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
+import packageMetadata from "../package.json";
 import { HashSection } from "./sections/HashSection";
 import { EncodingSection } from "./sections/EncodingSection";
 import { JwtSection } from "./sections/JwtSection";
 import { TextRegexSection } from "./sections/TextRegexSection";
 import { TimestampSection } from "./sections/TimestampSection";
+import { FileInspectorSection } from "./sections/FileInspectorSection";
+import { ReferenceSection } from "./sections/ReferenceSection";
+import { IocAnalyzerSection } from "./sections/IocAnalyzerSection";
+import { IOC_ANALYZER_EVENT } from "./lib/iocAnalyzer";
+import { SysadminSection } from "./sections/SysadminSection";
+import { PcapAnalyzerSection } from "./sections/PcapAnalyzerSection";
+import { OverviewSection } from "./sections/OverviewSection";
+import { Sidebar } from "./components/Layout";
+import { CommandPalette } from "./components/CommandPalette";
+import { FeedbackHost } from "./components/FeedbackHost";
+import { SectionHeader } from "./components/SectionHeader";
+import { NetworkAdvancedTools } from "./sections/NetworkAdvancedTools";
+import { estimatePasswordStrength } from "./lib/passwordStrength";
+import { appSections, type AppSectionId } from "./data/toolCatalog";
+import { copyToClipboard, notifyFeedback } from "./lib/feedback";
+import { emitFxEvent } from "./lib/fxEvents";
+import { readFxMode, saveFxMode, type FxMode } from "./lib/fxPreferences";
 
-type Page = "overview" | "network" | "password" | "hash" | "encoding" | "jwt" | "text" | "timestamp" | "about";
+type Page = AppSectionId;
 
 type NetworkResult = {
   address: string;
@@ -21,18 +39,6 @@ type NetworkResult = {
 };
 
 type CharacterSet = "lowercase" | "uppercase" | "numbers" | "symbols";
-
-const navigation: { id: Page; label: string; short: string }[] = [
-  { id: "overview", label: "Inicio", short: "01" },
-  { id: "network", label: "Network lab", short: "02" },
-  { id: "password", label: "Password lab", short: "03" },
-  { id: "hash", label: "Hash lab", short: "04" },
-  { id: "encoding", label: "Encoding lab", short: "05" },
-  { id: "jwt", label: "JWT inspector", short: "06" },
-  { id: "text", label: "Text & Regex lab", short: "07" },
-  { id: "timestamp", label: "Timestamp lab", short: "08" },
-  { id: "about", label: "Acerca de", short: "09" },
-];
 
 const characterSets: Record<CharacterSet, string> = {
   lowercase: "abcdefghijklmnopqrstuvwxyz",
@@ -198,6 +204,8 @@ function Icon({ name }: { name: "grid" | "network" | "key" | "info" | "arrow" })
 
 function App() {
   const [page, setPage] = useState<Page>("overview");
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [fxMode, setFxMode] = useState<FxMode>(readFxMode);
   const [networkInput, setNetworkInput] = useState("192.168.1.10/24");
   const [networkResult, setNetworkResult] = useState<NetworkResult | null>(() =>
     calculateNetwork("192.168.1.10/24"),
@@ -214,8 +222,51 @@ function App() {
   const [passwordError, setPasswordError] = useState("");
   const [copied, setCopied] = useState("");
   const [clipboardError, setClipboardError] = useState("");
+  const [iocPrefill, setIocPrefill] = useState("");
+  const passwordEstimate = password ? estimatePasswordStrength(password) : null;
 
-  const activeNav = navigation.find((item) => item.id === page) ?? navigation[0];
+  const activeNav = appSections.find((section) => section.id === page) ?? appSections[0];
+
+  function navigateTo(id: AppSectionId) {
+    if (id !== page) emitFxEvent("section");
+    setPage(id);
+    window.scrollTo(0, 0);
+  }
+
+  function openPalette() {
+    emitFxEvent("palette");
+    setPaletteOpen(true);
+  }
+
+  useEffect(() => {
+    function handleGlobalShortcut(event: KeyboardEvent) {
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "k" || event.altKey || event.shiftKey) return;
+      const target = event.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.isContentEditable || ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName))
+      ) return;
+      event.preventDefault();
+      setPaletteOpen((open) => {
+        if (!open) emitFxEvent("palette");
+        return !open;
+      });
+    }
+    window.addEventListener("keydown", handleGlobalShortcut);
+    return () => window.removeEventListener("keydown", handleGlobalShortcut);
+  }, []);
+
+  useEffect(() => {
+    const handleIocNavigation = (event: Event) => {
+      if (!(event instanceof CustomEvent) || typeof event.detail !== "string") return;
+      setIocPrefill(event.detail);
+      emitFxEvent("section");
+      setPage("ioc");
+      window.scrollTo(0, 0);
+    };
+    window.addEventListener(IOC_ANALYZER_EVENT, handleIocNavigation);
+    return () => window.removeEventListener(IOC_ANALYZER_EVENT, handleIocNavigation);
+  }, []);
 
   function submitNetwork(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -223,10 +274,12 @@ function App() {
     if (!result) {
       setNetworkResult(null);
       setNetworkError("Introduce una IPv4/CIDR válida, por ejemplo 192.168.1.10/24.");
+      notifyFeedback("Introduce una IPv4/CIDR válida.", "warning");
       return;
     }
     setNetworkResult(result);
     setNetworkError("");
+    notifyFeedback("Datos de red calculados localmente.");
   }
 
   function toggleSet(set: CharacterSet) {
@@ -241,16 +294,17 @@ function App() {
       setPassword(generatePassword(passwordLength, selectedSets));
       setPasswordError("");
       setCopied("");
+      notifyFeedback("Contraseña generada localmente.");
     } catch (error) {
-      setPasswordError(
-        error instanceof Error ? error.message : "No se pudo generar la contraseña.",
-      );
+      const message = error instanceof Error ? error.message : "No se pudo generar la contraseña.";
+      setPasswordError(message);
+      notifyFeedback(message, "error");
     }
   }
 
   async function copyText(value: string, kind: string) {
     try {
-      await navigator.clipboard.writeText(value);
+      await copyToClipboard(value, kind === "network" ? "Red" : "Contraseña");
       setCopied(kind);
       setClipboardError("");
       window.setTimeout(() => setCopied(""), 1800);
@@ -259,140 +313,47 @@ function App() {
     }
   }
 
+  function updateFxMode(mode: FxMode) {
+    setFxMode(mode);
+    if (!saveFxMode(mode)) {
+      notifyFeedback("El modo FX solo se mantendrá mientras esta página permanezca abierta.", "warning");
+    }
+  }
+
   return (
-    <div className="app-shell">
-      <aside className="sidebar">
-        <a className="brand" href="#" onClick={(event) => { event.preventDefault(); setPage("overview"); }}>
-          <span className="brand-mark"><span /></span>
-          <span className="brand-name">SMARTIN<span>TOOLS</span></span>
-        </a>
-        <div className="sidebar-label">WORKSPACE</div>
-        <nav className="side-nav" aria-label="Navegación principal">
-          {navigation.map((item) => (
-            <button
-              className={`nav-item ${page === item.id ? "active" : ""}`}
-              key={item.id}
-              onClick={() => setPage(item.id)}
-              aria-current={page === item.id ? "page" : undefined}
-            >
-              <span className="nav-icon">
-                <Icon
-                  name={
-                    item.id === "overview"
-                      ? "grid"
-                      : item.id === "network"
-                        ? "network"
-                        : item.id === "password"
-                          ? "key"
-                          : "info"
-                  }
-                />
-              </span>
-              <span>{item.label}</span>
-              <span className="nav-number">{item.short}</span>
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-bottom">
-          <div className="status-card">
-            <span className="status-indicator" />
-            <div>
-              <strong>Sistema operativo</strong>
-              <span>Utilidades locales activas</span>
-            </div>
-          </div>
-          <div className="sidebar-foot">SMARTIN TOOLS <span>v0.1.0</span></div>
-        </div>
-      </aside>
+    <div className="app-shell" data-fx={fxMode} data-page={page} data-palette-open={paletteOpen ? "true" : "false"}>
+      <Sidebar
+        active={page}
+        onSelect={navigateTo}
+        onTogglePalette={openPalette}
+        fxMode={fxMode}
+        onFxModeChange={updateFxMode}
+        paletteOpen={paletteOpen}
+        version={packageMetadata.version}
+      />
 
       <main className="main-area">
         <header className="topbar">
-          <div className="breadcrumb"><span>SMARTIN TOOLS</span><span className="crumb-slash">/</span>{activeNav.label}</div>
+          <div className="breadcrumb"><button type="button" onClick={() => navigateTo("overview")}>S0ul74 <span>// TOOLS</span></button><span className="crumb-slash">/</span><strong>{activeNav.label}</strong></div>
           <div className="topbar-right">
             <span className="local-badge"><span /> PROCESAMIENTO LOCAL</span>
-            <div className="avatar">ST</div>
+            <button type="button" className="topbar-search-trigger" onClick={openPalette} aria-label="Buscar herramientas, Ctrl+K">
+              <span aria-hidden="true">⌕</span><span>Buscar herramienta…</span><kbd>CTRL K</kbd>
+            </button>
           </div>
         </header>
 
         <div className="mobile-brand">
-          <span className="brand-mark"><span /></span>
-          <span className="brand-name">SMARTIN<span>TOOLS</span></span>
+          <span className="brand-name">S0ul74<span>// TOOLS</span></span>
+          <span className="mobile-version">v{packageMetadata.version}</span>
         </div>
 
         <div className="content-area">
-          {page === "overview" && (
-            <section className="page-view">
-              <div className="hero">
-                <div className="hero-copy">
-                  <div className="eyebrow"><span className="eyebrow-line" /> UTILITY DECK <span className="eyebrow-dot">●</span> 01 / 04</div>
-                  <h1>Herramientas claras.<br /><span>Control total.</span></h1>
-                  <p>Un espacio de trabajo para tus utilidades de red y seguridad. Rápido, privado y listo cuando lo necesitas.</p>
-                  <button className="primary-button" onClick={() => setPage("network")}>Explorar herramientas <Icon name="arrow" /></button>
-                </div>
-                <div className="hero-art" aria-hidden="true">
-                  <div className="art-ring ring-one" />
-                  <div className="art-ring ring-two" />
-                  <div className="art-cross cross-one" />
-                  <div className="art-cross cross-two" />
-                  <div className="art-core"><span>ST</span></div>
-                  <div className="orbit-label label-top">SECURE // LOCAL</div>
-                  <div className="orbit-label label-bottom">TOOLS ONLINE <span>●</span></div>
-                  <div className="art-coordinates">40° 25' 01.2"N<br />03° 42' 11.8"W</div>
-                </div>
-                <div className="hero-index">01<span>—</span>04</div>
-              </div>
-
-              <div className="section-heading">
-                <div><span className="section-kicker">ELIGE TU HERRAMIENTA</span><h2>Workspace</h2></div>
-                <span className="tools-count">07 HERRAMIENTAS DISPONIBLES</span>
-              </div>
-              <div className="tool-grid">
-                <button className="tool-card network-card" onClick={() => setPage("network")}>
-                  <div className="card-topline"><span className="tool-icon cyan-icon"><Icon name="network" /></span><span className="card-index">TOOL_01</span></div>
-                  <div className="tool-card-body"><span className="tool-tag">NETWORK / IPV4</span><h3>Network lab</h3><p>Calcula subredes IPv4, máscaras, rangos de hosts y direcciones de broadcast.</p></div>
-                  <div className="card-footer"><span>ABRIR HERRAMIENTA</span><Icon name="arrow" /></div>
-                </button>
-                <button className="tool-card password-card" onClick={() => setPage("password")}>
-                  <div className="card-topline"><span className="tool-icon violet-icon"><Icon name="key" /></span><span className="card-index">TOOL_02</span></div>
-                  <div className="tool-card-body"><span className="tool-tag">SECURITY / GENERATOR</span><h3>Password lab</h3><p>Crea contraseñas robustas con aleatoriedad criptográfica del navegador.</p></div>
-                  <div className="card-footer"><span>ABRIR HERRAMIENTA</span><Icon name="arrow" /></div>
-                </button>
-                <button className="tool-card hash-card" onClick={() => setPage("hash")}>
-                  <div className="card-topline"><span className="tool-icon cyan-icon"><Icon name="info" /></span><span className="card-index">TOOL_03</span></div>
-                  <div className="tool-card-body"><span className="tool-tag">SECURITY / DIGESTS</span><h3>Hash lab</h3><p>Calcula y compara hashes de texto y archivos de forma local.</p></div>
-                  <div className="card-footer"><span>ABRIR HERRAMIENTA</span><Icon name="arrow" /></div>
-                </button>
-                <button className="tool-card encoding-card" onClick={() => setPage("encoding")}>
-                  <div className="card-topline"><span className="tool-icon violet-icon"><Icon name="grid" /></span><span className="card-index">TOOL_04</span></div>
-                  <div className="tool-card-body"><span className="tool-tag">TRANSFORM / PIPELINES</span><h3>Encoding lab</h3><p>Transforma datos y ejecuta recetas encadenadas en tu navegador.</p></div>
-                  <div className="card-footer"><span>ABRIR HERRAMIENTA</span><Icon name="arrow" /></div>
-                </button>
-                <button className="tool-card jwt-card" onClick={() => setPage("jwt")}>
-                  <div className="card-topline"><span className="tool-icon cyan-icon"><Icon name="info" /></span><span className="card-index">TOOL_05</span></div>
-                  <div className="tool-card-body"><span className="tool-tag">TOKEN / READ ONLY</span><h3>JWT inspector</h3><p>Inspecciona header, payload y claims sin verificar la firma.</p></div>
-                  <div className="card-footer"><span>ABRIR HERRAMIENTA</span><Icon name="arrow" /></div>
-                </button>
-                <button className="tool-card textlab-card" onClick={() => setPage("text")}>
-                  <div className="card-topline"><span className="tool-icon cyan-icon"><Icon name="grid" /></span><span className="card-index">TOOL_06</span></div>
-                  <div className="tool-card-body"><span className="tool-tag">TEXT / REGEX / LOGS</span><h3>Text &amp; Regex lab</h3><p>Analiza, transforma, compara y extrae coincidencias sintácticas localmente.</p></div>
-                  <div className="card-footer"><span>ABRIR HERRAMIENTA</span><Icon name="arrow" /></div>
-                </button>
-                <button className="tool-card timelab-card" onClick={() => setPage("timestamp")}>
-                  <div className="card-topline"><span className="tool-icon violet-icon"><Icon name="info" /></span><span className="card-index">TOOL_07</span></div>
-                  <div className="tool-card-body"><span className="tool-tag">TIME / EPOCH / ZONES</span><h3>Timestamp lab</h3><p>Convierte Unix, ISO 8601 y zonas horarias; compara instantes y duraciones.</p></div>
-                  <div className="card-footer"><span>ABRIR HERRAMIENTA</span><Icon name="arrow" /></div>
-                </button>
-              </div>
-              <div className="privacy-note"><span className="privacy-symbol">◇</span><span><strong>Tu privacidad, primero.</strong> Los cálculos y la generación se ejecutan localmente en tu navegador.</span><span className="privacy-line" /></div>
-            </section>
-          )}
+          {page === "overview" && <OverviewSection onSelect={navigateTo} onOpenPalette={openPalette} version={packageMetadata.version} />}
 
           {page === "network" && (
             <section className="page-view tool-page">
-              <div className="page-title-row">
-                <div><div className="eyebrow"><span className="eyebrow-line" /> NETWORK / TOOL_01</div><h1>Network <span>lab.</span></h1><p className="page-description">Calculadora de subredes IPv4 y notación CIDR.</p></div>
-                <span className="tool-status"><span /> READY</span>
-              </div>
+              <SectionHeader eyebrow={<><span className="eyebrow-line" /> NETWORK / TOOL_01</>} title={<>Network <span>lab.</span></>} description="Calculadora de subredes IPv4 y notación CIDR." status="READY" />
               <div className="network-layout">
                 <div className="panel input-panel">
                   <div className="panel-heading"><div><span className="panel-kicker">01 / INPUT</span><h2>Define la red</h2></div><span className="panel-icon cyan-icon"><Icon name="network" /></span></div>
@@ -423,15 +384,13 @@ function App() {
                   ) : <div className="empty-state"><span>⌁</span><p>Introduce una dirección para ver los detalles de la subred.</p></div>}
                 </div>
               </div>
+              <NetworkAdvancedTools />
             </section>
           )}
 
           {page === "password" && (
             <section className="page-view tool-page">
-              <div className="page-title-row">
-                <div><div className="eyebrow"><span className="eyebrow-line violet-line" /> SECURITY / TOOL_02</div><h1>Password <span className="violet-text">lab.</span></h1><p className="page-description">Generador seguro. La contraseña no sale de este dispositivo.</p></div>
-                <span className="tool-status violet-status"><span /> CRYPTO READY</span>
-              </div>
+              <SectionHeader eyebrow={<><span className="eyebrow-line violet-line" /> SECURITY / TOOL_02</>} title={<>Password <span className="violet-text">lab.</span></>} description="Generador seguro. La contraseña no sale de este dispositivo." status="CRYPTO READY" statusClass="violet-status" />
               <div className="password-layout">
                 <div className="panel password-controls">
                   <div className="panel-heading"><div><span className="panel-kicker">01 / CONFIGURACIÓN</span><h2>Personaliza tu clave</h2></div><span className="panel-icon violet-icon"><Icon name="key" /></span></div>
@@ -457,6 +416,7 @@ function App() {
                   {clipboardError && <p className="error-message" role="alert">{clipboardError}</p>}
                   <div className={`password-display ${password ? "has-password" : ""}`} aria-live="polite">{password || <span>Tu contraseña aparecerá aquí</span>}</div>
                   {password && <div className="strength-line"><span className="strength-bars"><i /><i /><i /><i /></span><span>GENERADA CON CSPRNG</span><span>{password.length} CARACTERES</span></div>}
+                  {passwordEstimate && <div className="password-estimate" role="status"><strong>Fortaleza estimada: {passwordEstimate.strength}</strong><span>~{passwordEstimate.entropyBits.toFixed(1)} bits · alfabeto inferido: {passwordEstimate.characterPoolSize} caracteres</span><small>Estimación local orientativa; no detecta filtraciones, patrones lingüísticos ni reutilización.</small></div>}
                   <div className="password-actions">
                     <button className="primary-button violet-button full-button" onClick={createPassword}><span className="sparkle">✳</span> Generar otra <Icon name="arrow" /></button>
                     <button className="secondary-button full-button" onClick={() => void copyText(password, "password")} disabled={!password}>{copied === "password" ? "Copiada al portapapeles" : "Copiar contraseña"} <span>▣</span></button>
@@ -471,23 +431,30 @@ function App() {
           {page === "encoding" && <EncodingSection />}
           {page === "jwt" && <JwtSection />}
           {page === "text" && <TextRegexSection />}
+          {page === "ioc" && <IocAnalyzerSection initialText={iocPrefill} />}
+          {page === "sysadmin" && <SysadminSection />}
+          {page === "pcap" && <PcapAnalyzerSection />}
           {page === "timestamp" && <TimestampSection />}
+          {page === "file" && <FileInspectorSection />}
+          {page === "reference" && <ReferenceSection onNavigate={(id) => setPage(id)} />}
 
           {page === "about" && (
             <section className="page-view tool-page about-page">
-              <div className="eyebrow"><span className="eyebrow-line" /> ABOUT / SMARTIN TOOLS</div>
+              <div className="eyebrow"><span className="eyebrow-line" /> ABOUT / S0UL74-TOOLS</div>
               <h1>Simple, útil y <span>privado.</span></h1>
-              <p className="page-description">SMARTIN TOOLS es un espacio de utilidades para tareas cotidianas de redes y seguridad.</p>
+              <p className="page-description">S0ul74-Tools es un espacio de utilidades para tareas cotidianas de redes y seguridad.</p>
               <div className="about-grid">
-                <div className="panel about-card"><span className="tool-icon cyan-icon"><Icon name="network" /></span><h2>Network lab</h2><p>Calcula datos de redes IPv4 en formato CIDR, desde la máscara hasta el rango de hosts.</p><button className="text-button" onClick={() => setPage("network")}>ABRIR HERRAMIENTA <Icon name="arrow" /></button></div>
-                <div className="panel about-card"><span className="tool-icon violet-icon"><Icon name="key" /></span><h2>Password lab</h2><p>Genera contraseñas mediante Web Crypto API y procesamiento local en tu navegador.</p><button className="text-button violet-link" onClick={() => setPage("password")}>ABRIR HERRAMIENTA <Icon name="arrow" /></button></div>
+                <div className="panel about-card"><span className="tool-icon cyan-icon"><Icon name="network" /></span><h2>Network lab</h2><p>Calcula datos de redes IPv4 en formato CIDR, desde la máscara hasta el rango de hosts.</p><button className="text-button" onClick={() => navigateTo("network")}>ABRIR HERRAMIENTA <Icon name="arrow" /></button></div>
+                <div className="panel about-card"><span className="tool-icon violet-icon"><Icon name="key" /></span><h2>Password lab</h2><p>Genera contraseñas mediante Web Crypto API y procesamiento local en tu navegador.</p><button className="text-button violet-link" onClick={() => navigateTo("password")}>ABRIR HERRAMIENTA <Icon name="arrow" /></button></div>
               </div>
               <div className="privacy-note"><span className="privacy-symbol">◇</span><span><strong>Sin servicios externos.</strong> Esta versión no envía tus datos a ningún servidor ni modifica la configuración de red.</span><span className="privacy-line" /></div>
             </section>
           )}
         </div>
-        <footer className="app-footer"><span>© 2026 SMARTIN TOOLS</span><span>HECHO PARA TRABAJAR EN LOCAL <i>●</i></span></footer>
+        <footer className="app-footer"><span>© 2026 S0ul74-Tools</span><span>HECHO PARA TRABAJAR EN LOCAL <i>●</i></span></footer>
       </main>
+      {paletteOpen && <CommandPalette onClose={() => setPaletteOpen(false)} onNavigate={(id) => { navigateTo(id); setPaletteOpen(false); }} />}
+      <FeedbackHost />
     </div>
   );
 }

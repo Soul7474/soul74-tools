@@ -38,6 +38,23 @@ export function ipv4ToHex(address: string): string | null {
   return number.toString(16).padStart(8, "0");
 }
 
+export function convertIpv4(address: string): {
+  decimal: string;
+  hexadecimal: string;
+  binary: string;
+  integer: number;
+} | null {
+  const integer = ipv4ToNumber(address);
+  if (integer === null) return null;
+  const octets = address.trim().split(".").map(Number);
+  return {
+    decimal: octets.join("."),
+    hexadecimal: `0x${integer.toString(16).padStart(8, "0")}`,
+    binary: octets.map((octet) => octet.toString(2).padStart(8, "0")).join("."),
+    integer,
+  };
+}
+
 export function prefixToMask(prefix: number): string {
   if (prefix < 0 || prefix > 32) return "0.0.0.0";
   const mask = prefix === 0 ? 0 : ((0xffffffff << (32 - prefix)) >>> 0) >>> 0;
@@ -80,15 +97,15 @@ export function calculateNetworkSummary(input: string): NetworkSummary | null {
 
 export function subnetByCount(baseNetwork: string, subnetCount: number): SubnetSlice[] {
   const summary = calculateNetworkSummary(baseNetwork);
-  if (!summary) return [];
-  const target = Math.max(1, subnetCount);
-  const bitsNeeded = Math.ceil(Math.log2(target));
-  const prefix = Math.min(32, summary.prefix + bitsNeeded);
+  if (!summary || !Number.isSafeInteger(subnetCount) || subnetCount < 1 || subnetCount > 256) return [];
+  const bitsNeeded = Math.ceil(Math.log2(subnetCount));
+  const prefix = summary.prefix + bitsNeeded;
+  if (prefix > 32) return [];
   const subnetSize = 2 ** (32 - prefix);
   const start = ipv4ToNumber(summary.network) ?? 0;
   const slices: SubnetSlice[] = [];
 
-  for (let index = 0; index < target; index += 1) {
+  for (let index = 0; index < subnetCount; index += 1) {
     const networkNumber = start + index * subnetSize;
     const broadcastNumber = networkNumber + subnetSize - 1;
     const usableHosts = prefix < 31 ? Math.max(subnetSize - 2, 0) : subnetSize;
@@ -111,18 +128,23 @@ export function subnetByCount(baseNetwork: string, subnetCount: number): SubnetS
 
 export function vlsmSubnets(baseNetwork: string, requirements: number[]): SubnetSlice[] {
   const summary = calculateNetworkSummary(baseNetwork);
-  if (!summary) return [];
+  if (
+    !summary ||
+    requirements.length === 0 ||
+    requirements.length > 128 ||
+    requirements.some((hosts) => !Number.isSafeInteger(hosts) || hosts < 1 || hosts > 16_777_214)
+  ) return [];
 
   const sorted = [...requirements].sort((a, b) => b - a);
   const slices: SubnetSlice[] = [];
   let current = ipv4ToNumber(summary.network) ?? 0;
+  const networkEnd = current + summary.totalAddresses - 1;
 
   for (const hosts of sorted) {
-    if (hosts < 1) continue;
-    const needed = hosts + 1;
-    const bits = Math.max(1, Math.ceil(Math.log2(needed)));
-    const prefix = Math.min(32, 32 - bits);
+    const bits = Math.max(2, Math.ceil(Math.log2(hosts + 2)));
+    const prefix = 32 - bits;
     const size = 2 ** (32 - prefix);
+    if (current + size - 1 > networkEnd) return [];
     const network = numberToIpv4(current);
     const broadcast = numberToIpv4(current + size - 1);
     const usableHosts = prefix < 31 ? Math.max(size - 2, 0) : size;
@@ -143,10 +165,22 @@ export function vlsmSubnets(baseNetwork: string, requirements: number[]): Subnet
   return slices;
 }
 
+export function isIpv4InCidr(address: string, cidr: string): boolean {
+  const ip = ipv4ToNumber(address);
+  const summary = calculateNetworkSummary(cidr);
+  if (ip === null || !summary) return false;
+  const start = ipv4ToNumber(summary.network);
+  return start !== null && ip >= start && ip < start + summary.totalAddresses;
+}
+
 export function isValidIpv6(value: string): boolean {
   const trimmed = value.trim();
   if (!trimmed) return false;
-  if (trimmed.includes(":::") || trimmed.startsWith(":") || trimmed.endsWith(":")) return false;
+  if (
+    trimmed.includes(":::") ||
+    (trimmed.startsWith(":") && !trimmed.startsWith("::")) ||
+    (trimmed.endsWith(":") && !trimmed.endsWith("::"))
+  ) return false;
 
   const chunks = trimmed.split("::");
   if (chunks.length > 2) return false;
@@ -155,7 +189,7 @@ export function isValidIpv6(value: string): boolean {
     const left = chunks[0] ? chunks[0].split(":").filter(Boolean) : [];
     const right = chunks[1] ? chunks[1].split(":").filter(Boolean) : [];
     const total = left.length + right.length;
-    return total <= 7 && left.every((segment) => /^[0-9a-fA-F]{1,4}$/.test(segment)) && right.every((segment) => /^[0-9a-fA-F]{1,4}$/.test(segment));
+    return total < 8 && left.every((segment) => /^[0-9a-fA-F]{1,4}$/.test(segment)) && right.every((segment) => /^[0-9a-fA-F]{1,4}$/.test(segment));
   }
 
   const segments = trimmed.split(":");
@@ -167,7 +201,7 @@ export function normalizeIpv6(value: string): string {
   if (!isValidIpv6(value)) return "";
   const trimmed = value.trim();
   if (!trimmed.includes("::")) {
-    return trimmed.toLowerCase();
+    return trimmed.split(":").map((segment) => segment.padStart(4, "0").toLowerCase()).join(":");
   }
 
   const [left, right] = trimmed.split("::");
@@ -176,4 +210,78 @@ export function normalizeIpv6(value: string): string {
   const missing = 8 - (leftSegments.length + rightSegments.length);
   const assembled = [...leftSegments, ...Array.from({ length: missing }, () => "0"), ...rightSegments];
   return assembled.map((segment) => segment.padStart(4, "0")).join(":").toLowerCase();
+}
+
+function ipv6ToBigInt(value: string): bigint | null {
+  const normalized = normalizeIpv6(value);
+  if (!normalized) return null;
+  return normalized.split(":").reduce((result, segment) => (result << 16n) | BigInt(`0x${segment}`), 0n);
+}
+
+export function expandIpv6(value: string): string | null {
+  const normalized = normalizeIpv6(value);
+  return normalized || null;
+}
+
+export function compressIpv6(value: string): string | null {
+  const expanded = expandIpv6(value);
+  if (!expanded) return null;
+  const groups = expanded.split(":");
+  let bestStart = -1;
+  let bestLength = 1;
+  for (let index = 0; index < groups.length;) {
+    if (groups[index] !== "0000") {
+      index += 1;
+      continue;
+    }
+    let end = index;
+    while (end < groups.length && groups[end] === "0000") end += 1;
+    if (end - index > bestLength) {
+      bestStart = index;
+      bestLength = end - index;
+    }
+    index = end;
+  }
+  if (bestStart < 0) return groups.map((group) => Number.parseInt(group, 16).toString(16)).join(":");
+  const left = groups.slice(0, bestStart).map((group) => Number.parseInt(group, 16).toString(16)).join(":");
+  const right = groups.slice(bestStart + bestLength).map((group) => Number.parseInt(group, 16).toString(16)).join(":");
+  return `${left}::${right}`;
+}
+
+export type Ipv6AddressType = "loopback" | "link-local" | "ULA" | "multicast" | "global" | "documentation" | "unspecified" | "reserved";
+
+export function classifyIpv6(value: string): Ipv6AddressType | null {
+  const address = ipv6ToBigInt(value);
+  if (address === null) return null;
+  if (address === 1n) return "loopback";
+  if (address === 0n) return "unspecified";
+  if ((address >> 118n) === 0x3fan) return "link-local";
+  if ((address >> 121n) === 0x7en) return "ULA";
+  if ((address >> 120n) === 0xffn) return "multicast";
+  if ((address >> 96n) === 0x20010db8n) return "documentation";
+  if ((address >> 125n) === 1n) return "global";
+  return "reserved";
+}
+
+export function analyzeIpv6(input: string): {
+  address: string;
+  expanded: string;
+  compressed: string;
+  prefix: number;
+  network: string;
+  type: Ipv6AddressType;
+} | null {
+  const match = /^\s*([^/\s]+)(?:\/(\d{1,3}))?\s*$/.exec(input);
+  if (!match) return null;
+  const expanded = expandIpv6(match[1]);
+  const compressed = compressIpv6(match[1]);
+  const address = ipv6ToBigInt(match[1]);
+  const prefix = match[2] === undefined ? 128 : Number(match[2]);
+  const type = classifyIpv6(match[1]);
+  if (!expanded || !compressed || address === null || type === null || prefix < 0 || prefix > 128) return null;
+  const mask = prefix === 0 ? 0n : ((1n << BigInt(prefix)) - 1n) << BigInt(128 - prefix);
+  const networkAddress = (address & mask).toString(16).padStart(32, "0").match(/.{4}/g)?.join(":") ?? "";
+  const network = compressIpv6(networkAddress);
+  if (!network) return null;
+  return { address: match[1], expanded, compressed, prefix, network, type };
 }
